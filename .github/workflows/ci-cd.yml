@@ -1,0 +1,323 @@
+# ============================================================
+# .github/workflows/ci-cd.yml
+# Library Management System – CI/CD Pipeline
+# ============================================================
+#
+# Pipeline stages:
+#   1. backend-test   – Maven build + JaCoCo coverage
+#   2. frontend-test  – npm install + Angular build + Karma tests
+#   3. build-docker   – Docker image for backend (on main/develop)
+#   4. deploy-staging – Deploy to staging (on develop branch)
+#   5. deploy-prod    – Deploy to production (on main branch, manual approval)
+# ============================================================
+
+name: Library MS – CI/CD
+
+on:
+  push:
+    branches: [ main, develop, 'feature/**', 'hotfix/**' ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options: [ staging, production ]
+
+env:
+  JAVA_VERSION: '17'
+  NODE_VERSION: '20'
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/library-backend
+
+# ── 1. Backend CI ─────────────────────────────────────────────
+jobs:
+  backend-test:
+    name: 🔧 Backend – Build & Test
+    runs-on: ubuntu-latest
+
+    services:
+      oracle:
+        image: gvenzl/oracle-xe:21-slim
+        env:
+          ORACLE_PASSWORD: testpassword
+          APP_USER: library_user
+          APP_USER_PASSWORD: library_pass
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd "sqlplus -s system/testpassword@localhost/XEPDB1 <<< 'SELECT 1 FROM DUAL;'"
+          --health-interval 20s
+          --health-timeout 10s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      - name: Run tests with coverage
+        working-directory: backend
+        env:
+          SPRING_DATASOURCE_URL: jdbc:oracle:thin:@localhost:1521/XEPDB1
+          SPRING_DATASOURCE_USERNAME: library_user
+          SPRING_DATASOURCE_PASSWORD: library_pass
+          JWT_SECRET: dGVzdHNlY3JldGtleWZvcmNpdGVzdGluZ29ubHkxMjM0NTY3ODk=
+        run: mvn -B clean verify --no-transfer-progress
+
+      - name: Upload JaCoCo report
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: backend/target/site/jacoco/
+
+      - name: JaCoCo coverage comment (PR only)
+        if: github.event_name == 'pull_request'
+        uses: madrapps/jacoco-report@v1.6.1
+        with:
+          paths: backend/target/site/jacoco/jacoco.xml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          min-coverage-overall: 70
+          min-coverage-changed-files: 80
+
+      - name: Build fat JAR
+        working-directory: backend
+        run: mvn -B package -DskipTests --no-transfer-progress
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: backend/target/*.jar
+          retention-days: 7
+
+  # ── 2. Frontend CI ──────────────────────────────────────────
+  frontend-test:
+    name: 🎨 Frontend – Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint || true
+
+      - name: Run tests
+        working-directory: frontend
+        run: npm test -- --watch=false --browsers=ChromeHeadless --code-coverage
+
+      - name: Build production bundle
+        working-directory: frontend
+        run: npm run build:prod
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  # ── 3. Docker Build ─────────────────────────────────────────
+  build-docker:
+    name: 🐳 Docker – Build & Push
+    runs-on: ubuntu-latest
+    needs: [ backend-test, frontend-test ]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: backend/target/
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 4. Deploy Staging ───────────────────────────────────────
+  deploy-staging:
+    name: 🚀 Deploy – Staging
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://library-staging.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist/
+
+      - name: Deploy backend to staging
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            docker pull ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:develop
+            docker stop library-backend-staging || true
+            docker rm   library-backend-staging || true
+            docker run -d \
+              --name library-backend-staging \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              -e DB_USERNAME=${{ secrets.STAGING_DB_USER }} \
+              -e DB_PASSWORD=${{ secrets.STAGING_DB_PASS }} \
+              -e JWT_SECRET=${{ secrets.STAGING_JWT_SECRET }} \
+              ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:develop
+            echo "✅ Staging backend deployed"
+
+      - name: Deploy frontend to staging
+        uses: burnett01/rsync-deployments@6.0.0
+        with:
+          switches: -avz --delete
+          path: frontend-dist/library-management-frontend/browser/
+          remote_path: /var/www/library-staging/
+          remote_host: ${{ secrets.STAGING_HOST }}
+          remote_user: ${{ secrets.STAGING_USER }}
+          remote_key:  ${{ secrets.STAGING_SSH_KEY }}
+
+      - name: Smoke test staging
+        run: |
+          sleep 15
+          curl -f https://library-staging.example.com/api/actuator/health || exit 1
+          echo "✅ Staging health check passed"
+
+  # ── 5. Deploy Production ────────────────────────────────────
+  deploy-production:
+    name: 🏭 Deploy – Production
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://library.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist/
+
+      - name: Deploy backend to production
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            docker pull ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            docker stop library-backend-prod || true
+            docker rm   library-backend-prod || true
+            docker run -d \
+              --name library-backend-prod \
+              --restart unless-stopped \
+              -p 8080:8080 \
+              -e DB_USERNAME=${{ secrets.PROD_DB_USER }} \
+              -e DB_PASSWORD=${{ secrets.PROD_DB_PASS }} \
+              -e JWT_SECRET=${{ secrets.PROD_JWT_SECRET }} \
+              ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            echo "✅ Production backend deployed"
+
+      - name: Deploy frontend to production
+        uses: burnett01/rsync-deployments@6.0.0
+        with:
+          switches: -avz --delete
+          path: frontend-dist/library-management-frontend/browser/
+          remote_path: /var/www/library/
+          remote_host: ${{ secrets.PROD_HOST }}
+          remote_user: ${{ secrets.PROD_USER }}
+          remote_key:  ${{ secrets.PROD_SSH_KEY }}
+
+      - name: Production health check
+        run: |
+          sleep 20
+          curl -f https://library.example.com/api/actuator/health || exit 1
+          echo "✅ Production health check passed"
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}
+          release_name: "Release v${{ github.run_number }}"
+          body: |
+            ## Changes in this release
+            - Deployed from commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+          draft: false
+          prerelease: false

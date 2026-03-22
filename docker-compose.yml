@@ -1,0 +1,90 @@
+version: '3.9'
+
+# ============================================================
+# Library Management System – Local Development Stack
+# ============================================================
+# Usage:
+#   docker compose up -d oracle        # Start Oracle first (takes ~2 min)
+#   docker compose up -d backend       # Start backend
+#   docker compose up -d frontend      # Start Angular dev server (optional)
+#   docker compose logs -f backend     # Tail logs
+# ============================================================
+
+services:
+
+  # ── Oracle XE Database ───────────────────────────────────
+  oracle:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: library-oracle
+    restart: unless-stopped
+    environment:
+      ORACLE_PASSWORD: Admin123!
+      APP_USER: library_user
+      APP_USER_PASSWORD: library_pass
+    ports:
+      - "1521:1521"
+      - "5500:5500"   # Oracle Enterprise Manager Express
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'SELECT 1 FROM DUAL;' | sqlplus -s library_user/library_pass@localhost/XEPDB1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    networks:
+      - library-net
+
+  # ── Spring Boot Backend ──────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: library-backend
+    restart: unless-stopped
+    depends_on:
+      oracle:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:oracle:thin:@oracle:1521/XEPDB1
+      DB_USERNAME: library_user
+      DB_PASSWORD: library_pass
+      JWT_SECRET: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      SPRING_PROFILES_ACTIVE: docker
+    ports:
+      - "8080:8080"
+    volumes:
+      - backend_logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - library-net
+
+  # ── Angular Frontend (Nginx) ─────────────────────────────
+  frontend:
+    image: nginx:1.25-alpine
+    container_name: library-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "4200:80"
+    volumes:
+      - ./frontend/dist/library-management-frontend/browser:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - library-net
+
+volumes:
+  oracle_data:
+    driver: local
+  backend_logs:
+    driver: local
+
+networks:
+  library-net:
+    driver: bridge
