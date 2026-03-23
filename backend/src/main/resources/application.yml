@@ -8,7 +8,7 @@ spring:
 
   # Oracle Database Configuration
   datasource:
-    url: jdbc:oracle:thin:@192.168.1.4:1521:xe
+    url: jdbc:oracle:thin:@localhost:1521/XE
     username: system
     password: Sharanam@Ayyappa
     driver-class-name: oracle.jdbc.OracleDriver

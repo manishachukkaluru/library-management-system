@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.library.dto.request.BookRequest;
 import com.library.dto.response.BookResponse;
 import com.library.dto.response.PagedResponse;
+import com.library.security.JwtService;
 import com.library.service.BookService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,7 +30,9 @@ class BookControllerTest {
 
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
-    @MockBean  private BookService bookService;
+    @MockBean private BookService bookService;
+    @MockBean private JwtService jwtService;
+    @MockBean private org.springframework.security.core.userdetails.UserDetailsService userDetailsService;
 
     @Test
     @WithMockUser(roles = "LIBRARIAN")
