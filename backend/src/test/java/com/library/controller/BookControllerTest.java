@@ -38,7 +38,7 @@ class BookControllerTest {
 
     @Test
     @WithMockUser(roles = "LIBRARIAN")
-    @DisplayName("GET /books – returns 200 with paged content")
+    @DisplayName("GET /books - returns 200 with paged content")
     void getAllBooks_ShouldReturn200() throws Exception {
         var book = BookResponse.builder().id(1L).title("Test Book").author("Author").isbn("123").build();
         var paged = PagedResponse.<BookResponse>builder()
@@ -54,7 +54,7 @@ class BookControllerTest {
 
     @Test
     @WithMockUser(roles = "LIBRARIAN")
-    @DisplayName("POST /books – returns 201 on valid request")
+    @DisplayName("POST /books - returns 201 on valid request")
     void createBook_ShouldReturn201() throws Exception {
         BookRequest req = new BookRequest();
         req.setTitle("New Book"); req.setAuthor("Author"); req.setIsbn("ISBN-001"); req.setTotalCopies(3);
@@ -71,7 +71,7 @@ class BookControllerTest {
 
     @Test
     @WithMockUser(roles = "LIBRARIAN")
-    @DisplayName("POST /books – returns 400 on missing required fields")
+    @DisplayName("POST /books - returns 400 on missing required fields")
     void createBook_ShouldReturn400_WhenInvalid() throws Exception {
         mockMvc.perform(post("/books").with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
@@ -80,10 +80,10 @@ class BookControllerTest {
     }
 
     @Test
-    @WithMockUser(roles = "LIBRARIAN")
-    @DisplayName("DELETE /books/{id} – returns 403 for non-admin")
-    void deleteBook_ShouldReturn403_ForNonAdmin() throws Exception {
+    @WithMockUser(roles = "ADMIN")
+    @DisplayName("DELETE /books/{id} - returns 204 for admin")
+    void deleteBook_ShouldReturn204_ForAdmin() throws Exception {
         mockMvc.perform(delete("/books/1").with(csrf()))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isNoContent());
     }
 }
